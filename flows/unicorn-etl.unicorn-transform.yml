@@ -1,0 +1,50 @@
+id: unicorn-transform
+namespace: unicorn-etl
+
+triggers:
+  - id: unicorn-extract-success
+    type: io.kestra.core.models.triggers.types.Flow
+    conditions:
+      - type: io.kestra.core.models.conditions.types.ExecutionFlowCondition
+        namespace: unicorn-etl
+        flowId: unicorn-extract
+      - type: io.kestra.core.models.conditions.types.ExecutionStatusCondition
+        in:
+          - SUCCESS
+    inputs:
+      unicorn: "{{ outputs['copy-to-storage'].uris['unicorn.csv'] }}"
+
+tasks:
+  - id: dbt-worker
+    type: io.kestra.core.tasks.flows.WorkingDirectory
+    tasks:
+
+      - id: clone-repo
+        type: io.kestra.plugin.git.Clone
+        branch: main
+        password: "{{ envs.github_pat }}"
+        url: https://github.com/ryan-schofield/kestra-dbt.git
+        username: ryan-schofield
+
+      - id: copy-csv-to-local
+        type: io.kestra.core.tasks.storages.LocalFiles
+        inputs:
+          unicorn.csv: "{{ inputs.unicorn }}"
+      
+      - id: dbt
+        type: io.kestra.plugin.scripts.shell.Commands
+        commands:
+          - apt-get -q update -y
+          - apt-get -q install --no-install-recommends -y -f git
+          - export KESTRA_UNICORN_PATH="unicorn.csv"
+          - dbt deps
+          - dbt run
+          - 'echo "CURRENT DIRECTORY: ${PWD}"'
+        docker:
+          image: ghcr.io/kestra-io/dbt-duckdb:latest
+        warningOnStdErr: false
+
+      - id: copy-db-to-storage
+        type: io.kestra.core.tasks.storages.LocalFiles
+        outputs:
+          - "*.parquet"

@@ -1,0 +1,70 @@
+id: unicorn-load-to-delta
+namespace: unicorn-etl
+
+triggers:
+  - id: unicorn-transform-success
+    type: io.kestra.core.models.triggers.types.Flow
+    conditions:
+      - type: io.kestra.core.models.conditions.types.ExecutionFlowCondition
+        namespace: unicorn-etl
+        flowId: unicorn-transform
+      - type: io.kestra.core.models.conditions.types.ExecutionStatusCondition
+        in:
+          - SUCCESS
+    inputs:
+      uris: "{{ outputs['copy-db-to-storage'].uris }}"
+
+tasks:
+  - id: input-to-array
+    type: io.kestra.core.tasks.scripts.Python
+    inputFiles:
+      main.py: |
+        from kestra import Kestra
+
+        uris = {{ inputs.uris }}
+        parquet_files = [{k: v} for k, v in uris.items()]
+        Kestra.outputs({"parquet_files": parquet_files})
+
+  - id: convert-files-to-delta
+    type: io.kestra.core.tasks.flows.EachParallel
+    value: '{{ outputs["input-to-array"].vars.parquet_files }}'
+    tasks:
+
+      - id: convert-and-copy
+        type: io.kestra.core.tasks.flows.Sequential
+        tasks:
+
+          - id: delta-worker
+            type: io.kestra.core.tasks.flows.WorkingDirectory
+            tasks:
+            
+            - id: copy-parquet-to-local
+              type: io.kestra.core.tasks.storages.LocalFiles
+              inputs:
+                "{{ parents[0].taskrun.value }}"
+
+            - id: convert-file-to-delta
+              type: io.kestra.core.tasks.scripts.Python
+              inputFiles:
+                main.py: |
+                  import pyarrow.parquet as pq
+
+                  from deltalake.writer import write_deltalake
+                  from time import sleep
+
+                  output = {{ parents[0].taskrun.value }}
+                  file_name = list(output.keys())[0]
+                  table_name = file_name.replace(".parquet", "")
+
+                  table = pq.read_table(file_name)
+                  write_deltalake(f"delta/{table_name}", table, mode="overwrite")
+
+                  sleep(5)
+              requirements:
+                - pyarrow
+                - deltalake
+
+            - id: copy-delta-to-storage
+              type: io.kestra.core.tasks.storages.LocalFiles
+              outputs:
+                - "delta/**"
